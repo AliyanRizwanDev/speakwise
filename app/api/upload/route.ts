@@ -1,9 +1,11 @@
-import { put } from "@vercel/blob";
+import { del, put } from "@vercel/blob";
 import { NextResponse } from "next/server";
 
 import clientPromise from "@/lib/db";
 
 export const runtime = "nodejs";
+
+const MAX_UPLOAD_SIZE_BYTES = 100 * 1024 * 1024;
 
 const safeFilename = (name: string) =>
   name
@@ -12,30 +14,24 @@ const safeFilename = (name: string) =>
     .replace(/[^a-zA-Z0-9._-]/g, "");
 
 const uploadToBlob = async (pathname: string, file: File) => {
-  try {
-    return await put(pathname, file, {
-      access: "private",
-      addRandomSuffix: true,
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "";
-    const isPrivateStoreMismatch = message.includes(
-      "Cannot use private access on a public store",
-    );
-
-    if (!isPrivateStoreMismatch) {
-      throw error;
-    }
-
-    return put(pathname, file, {
-      access: "public",
-      addRandomSuffix: true,
-    });
-  }
+  return put(pathname, file, {
+    access: "private",
+    addRandomSuffix: true,
+  });
 };
 
 export async function POST(request: Request) {
   try {
+    const contentLengthHeader = request.headers.get("content-length");
+    const contentLength = contentLengthHeader ? Number(contentLengthHeader) : NaN;
+
+    if (Number.isFinite(contentLength) && contentLength > MAX_UPLOAD_SIZE_BYTES) {
+      return NextResponse.json(
+        { error: "Upload too large" },
+        { status: 413 },
+      );
+    }
+
     const formData = await request.formData();
     const file = formData.get("file");
 
@@ -43,11 +39,14 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "File is required" }, { status: 400 });
     }
 
-    const userIdRaw = formData.get("userId");
-    const userId =
-      typeof userIdRaw === "string" && userIdRaw.trim().length > 0
-        ? userIdRaw.trim()
-        : "temp";
+    const userId = request.headers.get("x-user-id")?.trim();
+
+    if (!userId) {
+      return NextResponse.json(
+        { error: "Unauthorized" },
+        { status: 401 },
+      );
+    }
 
     const fileName = safeFilename(file.name || "upload.bin");
     const pathname = `meetings/${Date.now()}-${fileName}`;
@@ -65,15 +64,20 @@ export async function POST(request: Request) {
       createdAt: new Date(),
     };
 
-    const { insertedId } = await db.collection("meetings").insertOne(meeting);
+    try {
+      const { insertedId } = await db.collection("meetings").insertOne(meeting);
 
-    return NextResponse.json(
-      {
-        meetingId: insertedId.toString(),
-        blobUrl: blob.url,
-      },
-      { status: 201 },
-    );
+      return NextResponse.json(
+        {
+          meetingId: insertedId.toString(),
+          blobUrl: blob.url,
+        },
+        { status: 201 },
+      );
+    } catch (error) {
+      await del(blob.url);
+      throw error;
+    }
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "Unexpected upload error";

@@ -35,10 +35,15 @@ export const UploadFile = () => {
 
       const formData = new FormData();
       formData.append("file", selectedFile);
-      formData.append("userId", "temp");
 
-      const { data } = await axios.post<UploadResponse>("/api/upload", formData);
+      const headers =
+        process.env.NODE_ENV === "development"
+          ? { "x-user-id": "temp" }
+          : undefined;
 
+      const { data } = await axios.post<UploadResponse>("/api/upload", formData, {
+        headers,
+      });
       setSuccessMessage(
         `Upload successful. Meeting ID: ${data.meetingId}`,
       );
